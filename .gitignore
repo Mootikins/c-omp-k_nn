@@ -1,0 +1,5 @@
+debug
+knn
+.cache/
+*.wiki
+*.pdf
