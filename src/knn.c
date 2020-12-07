@@ -20,6 +20,7 @@ typedef struct options_t
 	size_t k_nearest_neighbors;
 	bool label_defined;
 	char* filename;
+	size_t num_threads;
 } options_t;
 
 typedef struct data_point_t
@@ -39,23 +40,26 @@ typedef struct training_data_t
 
 typedef struct distance_t
 {
-	long double distance;
-	data_point_t* other_data_point;
+	double distance;
+	data_point_t* paired_data;
 } distance_t;
 
-typedef struct knn_distances_t
+int comp_dist( const void* a, const void* b )
 {
-	size_t num_distances;
-	distance_t* distances;
-} knn_distances_t;
-
-int comp_dist( const void* dist1, const void* dist2 )
-{
-	distance_t d_1 = *( (distance_t*)dist1 );
-	distance_t d_2 = *( (distance_t*)dist2 );
-	if ( d_1.distance > d_2.distance ) return 1;
-	if ( d_1.distance < d_2.distance ) return -1;
-	return 0;
+	double d_1 = ( (distance_t*)a )->distance;
+	double d_2 = ( (distance_t*)b )->distance;
+	if ( d_1 < d_2 )
+	{
+		return -1;
+	}
+	else if ( d_1 > d_2 )
+	{
+		return 1;
+	}
+	else
+	{
+		return 0;
+	}
 }
 
 void usage( char* prog_name, int exit_code )
@@ -64,59 +68,60 @@ void usage( char* prog_name, int exit_code )
 	  stderr,
 	  // It's an ugly string but clang-format destroyed it *shrug*
 	  "USAGE:"
-	  "    %s [FLAGS and OPTIONS] FILE"
+	  "    %s [FLAGS and OPTIONS] FILE\n"
 	  "\n"
 	  "Supplied data should be given in the same order/format as the input file, "
-	  "eg a"
-	  "csv file  with 2 real values, the label, then 2 more real values, a "
-	  "single data"
-	  "point should be like so:"
+	  "eg a\n"
+	  "csv file with 2 real values, the label, then 2 more real values, a "
+	  "single data\n"
+	  "point should be like so:\n"
 	  "\n"
-	  "    real1,real2,real3,real4"
+	  "    real1,real2,real3,real4\n"
 	  "\n"
 	  "ARGUMENTS:"
 	  "\n"
 	  "    FILE    The name of a comma or tab separated value file, in which the "
-	  "first"
+	  "first\n"
 	  "            row can be the labels, which will be ignored. The specified "
-	  "file"
+	  "file\n"
 	  "            should not have more than one non-real field/column, which "
-	  "should"
+	  "should\n"
 	  "            be the label for that data entry. If any columns have a "
-	  "label, you"
+	  "label, you\n"
 	  "            must use one of the classification flags (-c or "
-	  "--classification)."
+	  "--classification).\n"
 	  "            Otherwise, use the regression flags (-r or --regression). If "
-	  "you"
+	  "you\n"
 	  "            are classifying a file that does not have any labels, you "
-	  "must use"
+	  "must use\n"
 	  "            the label option (-l or --label) to specify a column number "
-	  "to use"
+	  "to use\n"
 	  "            as the label (0-indexed)."
 	  "\n"
 	  "\n"
-	  "FLAGS:"
+	  "FLAGS:\n"
 	  "\n"
-	  "    -c, --classification     Classify data read from stdin"
+	  "    -c, --classification     Classify data read from stdin\n"
 	  "\n"
 	  "    -r, --regression         Use a regression of the data in FILE to "
-	  "predict the"
+	  "predict the\n"
 	  "                             value of the dependent variable in the "
-	  "specified"
+	  "specified\n"
 	  "                             column (-l or --label is required)"
 	  "\n"
-	  "    -h, --help               Show this help text"
+	  "    -h, --help               Show this help text\n"
 	  "\n"
-	  "OPTIONS:"
+	  "OPTIONS:\n"
 	  "\n"
 	  "    -l, --label-column       Column number to use as the label for "
-	  "regression;"
-	  "                             required when using the -r/--regression flag"
+	  "regression;\n"
+	  "                             required when using the -r/--regression flag\n"
 	  "\n"
-	  "    -k, --k-nearest          Number of nearest neighbors to use when"
+	  "    -k, --k-nearest          Number of nearest neighbors to use when\n"
 	  "                             classifying or performing regression on an "
-	  "input"
-	  "                             data point -- default is 5",
+	  "input\n"
+	  "                             data point -- default is 5\n"
+	  "    -t, --threads            Number of threads to use -- defaults to 4\n",
 	  prog_name );
 	exit( exit_code );
 }
@@ -126,7 +131,7 @@ options_t process_args( int argc, char* argv[] )
 	for ( int i = 0; i < argc; ++i )
 	{
 		if ( strcmp( argv[i], "-h" ) == 0 || strcmp( argv[i], "--help" ) == 0 )
-			exit( EX_OK );
+			usage(argv[0], EX_OK );
 	}
 
 	// Setup defaults
@@ -136,6 +141,10 @@ options_t process_args( int argc, char* argv[] )
 	opts.label_column = -1;
 	opts.label_defined = false;
 	opts.k_nearest_neighbors = 5;
+	opts.num_threads = 4;
+
+	bool reg_flag = false, class_flag = false, label_flag = false;
+	printf("%s\n", argv[1]);
 
 	for ( int i = 1; i < argc - 1; ++i )
 	{
@@ -143,19 +152,23 @@ options_t process_args( int argc, char* argv[] )
 		     strcmp( "--classification", argv[i] ) == 0 )
 		{
 			opts.classification = true;
+			opts.regression = false;
+			class_flag = true;
 		}
 		else if ( strcmp( "-r", argv[i] ) == 0 ||
 		          strcmp( "--regression", argv[i] ) == 0 )
 		{
 			opts.regression = true;
+			opts.classification = false;
+			reg_flag = true;
 		}
 		else if ( ( strcmp( "-l", argv[i] ) == 0 ||
 		            strcmp( "--label-column", argv[i] ) == 0 ) &&
 		          i + 1 < argc )
 		{
-			printf( "Read label column: %s", argv[i] );
 			opts.label_column = atoi( argv[i + 1] );
 			opts.label_defined = true;
+			label_flag = true;
 		}
 		else if ( ( strcmp( "-k", argv[i] ) == 0 ||
 		            strcmp( "--k-nearest", argv[i] ) == 0 ) &&
@@ -163,20 +176,33 @@ options_t process_args( int argc, char* argv[] )
 		{
 			opts.k_nearest_neighbors = atoi( argv[i + 1] );
 		}
+		else if ( ( strcmp( "-t", argv[i] ) == 0 ||
+		            strcmp( "--threads", argv[i] ) == 0 ) &&
+		          i + 1 < argc )
+		{
+			opts.num_threads = atoi( argv[i + 1] );
+		}
 	}
 
-	if ( opts.classification && opts.regression )
+	if ( class_flag && reg_flag )
 	{
 		fprintf( stderr,
-		         "Both classification and regression were passed as flags -- use "
-		         "one or the other\n\n" );
+		         "Both classification and regression were passed as flags\n"
+		         "Use one or the other\n" );
 		exit( EX_USAGE );
 	}
-
-	if ( opts.regression && !opts.label_defined )
+	else if ( reg_flag && !label_flag )
 	{
 		fprintf( stderr,
 		         "Regression and label column flags are required together\n" );
+		exit( EX_USAGE );
+	}
+	else if ( class_flag && label_flag )
+	{
+		fprintf(
+		  stderr,
+		  "A column should not be defined if using classification\n"
+		  "If the classifier is an number, change it to a string (man sed)" );
 		exit( EX_USAGE );
 	}
 
@@ -185,6 +211,22 @@ options_t process_args( int argc, char* argv[] )
 	opts.filename = argv[argc - 1];
 
 	return opts;
+}
+
+bool is_label( char* split )
+{
+	bool is_label = false;
+
+	for ( int i = 0; i < strlen( split ) && !is_label; ++i )
+	{
+		if ( !isdigit( split[i] ) && split[i] != '.' && split[i] != '-' )
+		{
+			// Shortcut out
+			return true;
+		}
+	}
+
+	return false;
 }
 
 uint64_t count_lines( FILE* file, options_t* options )
@@ -200,20 +242,20 @@ uint64_t count_lines( FILE* file, options_t* options )
 	getline( &line, &max_line_len, file );
 
 	char* split = strtok( line, "," );
-	size_t not_real_number_columns = 0;
+	size_t non_real_in_first_line = 0;
 	size_t columns = 0;
 
 	while ( split != NULL )
 	{
-		if ( isalpha( split[0] ) || split[0] == '.' )
+		if ( is_label( split ) )
 		{
-			not_real_number_columns++;
+			non_real_in_first_line++;
 		}
 		columns++;
 		split = strtok( NULL, "," );
 	}
 
-	if ( not_real_number_columns >= 2 )
+	if ( non_real_in_first_line >= 2 )
 	{
 		// We can ignore the first line when we allocate space
 		lines--;
@@ -224,6 +266,45 @@ uint64_t count_lines( FILE* file, options_t* options )
 		options->has_header = false;
 	}
 	options->num_columns = columns;
+
+	// lets detect the label column too
+	getline( &line, &max_line_len, file );
+	line[strlen(line) - 1] = 0; // Fix dat newline
+	split = strtok( line, "," );
+	size_t non_real_data_columns = 0;
+	size_t column_num = 0;
+
+	while ( split != NULL )
+	{
+		if ( is_label( split ) )
+		{
+			non_real_data_columns++;
+			if ( options->label_defined && options->label_column != column_num )
+			{
+				fprintf( stderr,
+				         "Given label column does not match label in data"
+				         " (%zu != %zu, Data = %s)\n",
+				         column_num, options->label_column, split );
+				exit( EX_DATAERR );
+			}
+			options->label_column = column_num;
+			options->label_defined = true;
+			options->classification = true;
+		}
+		column_num++;
+		split = strtok( NULL, "," );
+	}
+
+	if ( options->regression && non_real_data_columns > 0 )
+	{
+		fprintf( stderr, "Regression specified but data file has non-real data\n" );
+		exit( EX_DATAERR );
+	}
+	else if ( non_real_data_columns > 1 )
+	{
+		fprintf( stderr, "Data file has more than one non-real data column\n" );
+		exit( EX_DATAERR );
+	}
 
 	fseek( file, 0, SEEK_SET );
 
@@ -249,34 +330,11 @@ data_point_t parse_training_line( char* line, options_t* opts )
 
 	while ( split != NULL )
 	{
-		bool is_label = false;
-
-		for ( int i = 0; i < strlen( split ) && !is_label; ++i )
-		{
-			if ( !isdigit( split[i] ) && split[i] != '.' && split[i] != '-' )
-			{
-				opts->label_column = column_num;
-				opts->label_defined = true;
-				num_labels++;
-
-				// Shortcut out
-				is_label = true;
-				if ( num_labels > 1 )
-				{
-					fprintf(
-					  stderr,
-					  "More than one non-real value in data point: check input file\n" );
-					exit( EX_DATAERR );
-				}
-			}
-		}
-
 		// This column is the label column
-		if ( opts->label_defined && opts->label_column == column_num )
+		if ( opts->label_column == column_num )
 		{
-			if ( is_label )
+			if ( opts->classification )
 			{
-				data_point.label = malloc( sizeof( char ) * strlen( split ) );
 				data_point.label = strdup( split );
 
 				data_point.output_feature = FP_NAN;
@@ -285,8 +343,9 @@ data_point_t parse_training_line( char* line, options_t* opts )
 			else
 			{
 				data_point.output_feature = strtod( split, NULL );
-				data_point.label = NULL;
+				data_point.label = split;
 				data_point.label_is_double = true;
+				feature_num++;
 			}
 		}
 		else  // This column is a feature
@@ -312,7 +371,7 @@ data_point_t parse_training_line( char* line, options_t* opts )
 		}
 		else
 		{
-			fprintf( stderr, "No label column defined for regression" );
+			fprintf( stderr, "No label column defined for regression\n" );
 			exit( EX_DATAERR );
 		}
 	}
@@ -327,7 +386,7 @@ data_point_t parse_query_line( char* line, size_t num_features )
 	data_pt.features = malloc( sizeof( long double ) * num_features );
 	data_pt.label_is_double = true;
 	data_pt.label = NULL;
-	data_pt.output_feature = 42;
+	data_pt.output_feature = 0;
 
 	char* split = strtok( line, "," );
 
@@ -366,11 +425,11 @@ void print_data_point( data_point_t data_pt )
 {
 	if ( data_pt.label_is_double )
 	{
-		printf( "Label: %Lf\nFeatures: ", data_pt.output_feature );
+		printf( "Label (double): %Lf\nFeatures: ", data_pt.output_feature );
 	}
 	else
 	{
-		printf( "Label: %s\nFeatures: ", data_pt.label );
+		printf( "Label (string): %s\nFeatures: ", data_pt.label );
 	}
 
 	for ( int i = 0; i < data_pt.num_features; ++i )
@@ -394,9 +453,10 @@ void free_training_data( training_data_t data )
 	free( data.samples );
 }
 
-distance_t euclid_dist( data_point_t training_pt, data_point_t query_pt )
+distance_t euclid_dist( data_point_t* training_pt, data_point_t* query_pt )
 {
 	distance_t distance;
+	distance.distance = 0;
 	if ( training_pt->num_features != query_pt->num_features )
 	{
 		fprintf( stderr, "Read data point has improper number of features\n" );
@@ -410,12 +470,75 @@ distance_t euclid_dist( data_point_t training_pt, data_point_t query_pt )
 	}
 
 	distance.distance = pow( distance.distance, 0.5 );
-	distance.other_data_point = training_pt;
+	distance.paired_data = training_pt;
 
 	return distance;
 }
 
-void knn( training_data_t data, options_t opts )
+char* find_classification( distance_t* distances, size_t num_neighbors )
+{
+	int* counts = calloc( num_neighbors, sizeof( int ) );
+	size_t num_unique_labels = 0;
+	char** unique_labels = calloc( num_neighbors, sizeof( char* ) );
+
+	for ( int i = 0; i < num_neighbors; ++i )
+	{
+		char* neighbor_label = distances[i].paired_data->label;
+
+		// For the first iteration where we have to put in at least one label
+		if ( num_unique_labels == 0 )
+		{
+			unique_labels[0] = strdup( neighbor_label );
+			counts[0]++;
+			num_unique_labels++;
+		}
+		else
+		{
+			bool found = false;
+			for ( int j = 0; !found && j < num_unique_labels; ++j )
+			{
+				if ( strcmp( neighbor_label, unique_labels[j] ) == 0 )
+				{
+					counts[j]++;
+
+					// break out
+					found = true;
+				}
+			}
+
+			if ( !found )
+			{
+				unique_labels[i] = strdup( neighbor_label );
+				num_unique_labels++;
+				counts[i]++;
+			}
+		}
+	}
+
+	int max = counts[0];
+	size_t max_index = 0;
+	for ( int i = 1; i < num_unique_labels; ++i )
+	{
+		if ( counts[i] > max )
+		{
+			max = counts[i];
+			max_index = i;
+		}
+	}
+
+	char* return_label = strdup( unique_labels[max_index] );
+
+	for ( int i = 0; i < num_unique_labels; ++i )
+	{
+		free( unique_labels[i] );
+	}
+	free( unique_labels );
+	free( counts );
+
+	return return_label;
+}
+
+void knn( training_data_t* data, options_t opts )
 {
 	printf(
 	  "Training data parsed\nReading input queries in same format as input "
@@ -430,62 +553,36 @@ void knn( training_data_t data, options_t opts )
 	{
 		data_point_t query_data = parse_query_line( line, opts.num_columns - 1 );
 
-#ifdef DEBUG
-		print_data_point( query_data );
-#endif
+		distance_t* distances;
+		distances = malloc( sizeof( distance_t ) * data->num_samples );
 
-		knn_distances_t distances;
-		distances.num_distances = data.num_samples;
-		distances.distances =
-		  malloc( sizeof( knn_distances_t ) * data.num_samples );
-
-		for ( int i = 0; i < data.num_samples; ++i )
+#pragma omp parallel for schedule( static ) num_threads( opts.num_threads )
+		for ( int i = 0; i < data->num_samples; ++i )
 		{
-			distances.distances[i] = euclid_dist( data.samples[i], query_data );
+			distances[i] = euclid_dist( &data->samples[i], &query_data );
 		}
 
-		qsort( distances.distances, distances.num_distances, sizeof( distance_t* ),
-		       comp_dist );
+		qsort( distances, data->num_samples, sizeof( *distances ), comp_dist );
 
 		if ( opts.classification )
 		{
-			int* counts = calloc( opts.k_nearest_neighbors, sizeof( int ) );
-			size_t num_uniq_labels = 0;
-			char** labels = calloc( opts.k_nearest_neighbors, sizeof( char* ) );
-			for ( int i = 0; i < opts.k_nearest_neighbors; ++i )
-			{
-				for ( int j = 0; j < num_uniq_labels; ++j )
-				{
-					// Label of current neighbor is in the unique list
-					if ( strcmp( labels[j],
-					             distances.distances[i].other_data_point->label ) == 0 )
-					{
-						counts[j]++;
-					}
-					else
-					{
-						labels[j] = strdup( distances.distances[i].other_data_point->label );
-					}
-				}
-			}
-
-			for (int i = 0; i < num_uniq_labels; ++i) {
-				free(labels[i]);
-			}
-			free( labels );
-			free( counts );
+			char* classification =
+			  find_classification( distances, opts.k_nearest_neighbors );
+			printf( "Predicted data point classification: %s\n", classification );
+			free( classification );
 		}
 		else
 		{
 			long double regression_avg = 0;
 			for ( int i = 0; i < opts.k_nearest_neighbors; ++i )
 			{
-				regression_avg +=
-				  distances.distances[i].other_data_point->output_feature;
+				regression_avg += distances[i].paired_data->output_feature;
 			}
+			regression_avg /= opts.k_nearest_neighbors;
+			printf( "Predicted output feature: %Lf\n", regression_avg );
 		}
 
-		free( distances.distances );
+		free( distances );
 	}
 }
 
@@ -513,7 +610,6 @@ int main( int argc, char* argv[] )
 	  malloc( sizeof( data_point_t ) * training_data.num_samples );
 
 	parse_file( &training_data, data_file, options );
-	printf( "Label Column: %zu\n", options.label_column );
 
 #ifdef DEBUG
 	for ( int i = 0; i < training_data.num_samples; ++i )
@@ -522,11 +618,11 @@ int main( int argc, char* argv[] )
 	}
 #endif
 
-	knn( training_data, options );
+	fclose( data_file );
+
+	knn( &training_data, options );
 
 	free_training_data( training_data );
-
-	fclose( data_file );
 
 	return 0;
 }
