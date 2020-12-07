@@ -115,7 +115,8 @@ void usage( char* prog_name, int exit_code )
 	  "\n"
 	  "    -l, --label-column       Column number to use as the label for "
 	  "regression;\n"
-	  "                             required when using the -r/--regression flag\n"
+	  "                             required when using the -r/--regression "
+	  "flag\n"
 	  "\n"
 	  "    -k, --k-nearest          Number of nearest neighbors to use when\n"
 	  "                             classifying or performing regression on an "
@@ -131,7 +132,7 @@ options_t process_args( int argc, char* argv[] )
 	for ( int i = 0; i < argc; ++i )
 	{
 		if ( strcmp( argv[i], "-h" ) == 0 || strcmp( argv[i], "--help" ) == 0 )
-			usage(argv[0], EX_OK );
+			usage( argv[0], EX_OK );
 	}
 
 	// Setup defaults
@@ -144,7 +145,6 @@ options_t process_args( int argc, char* argv[] )
 	opts.num_threads = 4;
 
 	bool reg_flag = false, class_flag = false, label_flag = false;
-	printf("%s\n", argv[1]);
 
 	for ( int i = 1; i < argc - 1; ++i )
 	{
@@ -269,7 +269,7 @@ uint64_t count_lines( FILE* file, options_t* options )
 
 	// lets detect the label column too
 	getline( &line, &max_line_len, file );
-	line[strlen(line) - 1] = 0; // Fix dat newline
+	line[strlen( line ) - 1] = 0;  // Fix dat newline
 	split = strtok( line, "," );
 	size_t non_real_data_columns = 0;
 	size_t column_num = 0;
@@ -556,7 +556,12 @@ void knn( training_data_t* data, options_t opts )
 		distance_t* distances;
 		distances = malloc( sizeof( distance_t ) * data->num_samples );
 
-#pragma omp parallel for schedule( static ) num_threads( opts.num_threads )
+		// We use a big block when scheduling so that each CPU hopefully does all the
+		// tasks one after another and keeps nearby data in cache, but so much of it
+		// is in the heap behind pointers that it probably makes little difference
+#pragma omp parallel for schedule( static,                                    \
+                                   2 * data->num_samples / opts.num_threads ) \
+  num_threads( opts.num_threads )
 		for ( int i = 0; i < data->num_samples; ++i )
 		{
 			distances[i] = euclid_dist( &data->samples[i], &query_data );

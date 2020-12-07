@@ -2,13 +2,12 @@ USAGE:
     %s [FLAGS and OPTIONS] FILE
 
 Supplied data should be given in the same order/format as the input file, eg a
-csv file  with 2 real values, the label, then 2 more real values, a single data
+csv file with 2 real values, the label, then 2 more real values, a single data
 point should be like so:
 
     real1,real2,real3,real4
 
 ARGUMENTS:
-
 
     FILE    The name of a comma or tab separated value file, in which the first
             row can be the labels, which will be ignored. The specified file
@@ -19,7 +18,6 @@ ARGUMENTS:
             are classifying a file that does not have any labels, you must use
             the label option (-l or --label) to specify a column number to use
             as the label (0-indexed).
-
 
 FLAGS:
 
